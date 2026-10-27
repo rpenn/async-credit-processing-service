@@ -1,0 +1,34 @@
+# Private build prompt (not part of the submission)
+basta-credit-service-prompt.md
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Python bytecode and build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments (uv creates .venv)
+.venv/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Celery beat local schedule state (when beat runs outside Docker)
+celerybeat-schedule*
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
