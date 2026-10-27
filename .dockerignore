@@ -1,0 +1,7 @@
+# Allow-list: send only what the image build needs.
+# Everything else (.env, .git, .venv, tests, caches, the prompt file) stays out.
+*
+!pyproject.toml
+!uv.lock
+!src/
+**/__pycache__

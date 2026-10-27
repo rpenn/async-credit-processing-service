@@ -1,0 +1,100 @@
+# Full local stack: `docker compose up --build`.
+# Requires a .env file (cp .env.example .env).
+# Host ports bind to 127.0.0.1 only; MongoDB and AMQP are not exposed to the host at all.
+
+x-app: &app
+  build: .
+  image: credit-service:local
+  restart: unless-stopped
+  environment:
+    MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
+    BROKER_URL: amqp://${RABBITMQ_USER:?set in .env}:${RABBITMQ_PASSWORD:?set in .env}@rabbitmq:5672//
+  depends_on:
+    mongo:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+
+services:
+  mongo:
+    image: mongo:8.0.34
+    # Transactions need a replica set; a single node is enough locally.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # Healthy once the replica set has a primary. Initiates the set on first boot.
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - >-
+          try { rs.status() } catch (e) {
+          rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }) };
+          if (!db.hello().isWritablePrimary) { quit(1) }
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:4.3.7-management
+    # The node name (and its data directory) is derived from the hostname, so pin it.
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set in .env}
+    ports:
+      - "127.0.0.1:15672:15672"  # management UI
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  api:
+    <<: *app
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      # The slim image has no curl, so use Python's standard library.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    <<: *app
+    # Gossip (worker-to-worker event sharing) is unused, and its queue is the same
+    # non-durable, non-exclusive kind that RabbitMQ 4.3 refuses.
+    command: ["celery", "-A", "credit_service.worker.app", "worker", "--loglevel=INFO", "--without-gossip"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A credit_service.worker.app inspect ping -d celery@$$HOSTNAME --timeout 5"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
+
+  beat:
+    <<: *app
+    # The schedule state file goes to /tmp because the app user cannot write to /app.
+    command:
+      - celery
+      - -A
+      - credit_service.worker.app
+      - beat
+      - --loglevel=INFO
+      - --schedule=/tmp/celerybeat-schedule
+
+volumes:
+  mongo-data:
+  rabbitmq-data:
