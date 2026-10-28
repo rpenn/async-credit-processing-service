@@ -3,10 +3,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from pymongo.errors import PyMongoError
 
 from credit_service.api import credits, health
 from credit_service.api.correlation import CorrelationIdMiddleware
-from credit_service.api.problems import ProblemError, problem_handler, validation_error_handler
+from credit_service.api.problems import (
+    ProblemError,
+    database_error_handler,
+    problem_handler,
+    validation_error_handler,
+)
 from credit_service.messaging import create_celery_app
 from credit_service.mongo import create_async_client, ensure_indexes_async
 from credit_service.settings import Settings
@@ -34,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         exception_handlers={
             ProblemError: problem_handler,
             RequestValidationError: validation_error_handler,
+            PyMongoError: database_error_handler,
         },
     )
     app.add_middleware(CorrelationIdMiddleware)

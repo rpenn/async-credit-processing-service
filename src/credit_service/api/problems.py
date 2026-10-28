@@ -4,6 +4,7 @@ Errors the app raises itself are RFC 9457 problem details (application/problem+j
 Request validation errors keep FastAPI's standard 422 body.
 """
 
+import logging
 from decimal import Decimal
 
 from fastapi import Request
@@ -11,6 +12,11 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from pymongo.errors import PyMongoError
+
+from credit_service.mongo import is_transient
+
+logger = logging.getLogger(__name__)
 
 PROBLEM_JSON = "application/problem+json"
 
@@ -50,3 +56,20 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     """
     errors = jsonable_encoder(exc.errors(), custom_encoder={Decimal: str})
     return JSONResponse({"detail": errors}, status_code=422)
+
+
+async def database_error_handler(request: Request, exc: PyMongoError) -> JSONResponse:
+    """MongoDB is unreachable or too slow: 503, so the client knows to retry.
+
+    The credit may have been stored even so (the commit can succeed after the deadline), so
+    the safe retry carries the same Idempotency-Key. Other database errors stay 500s.
+    """
+    if not is_transient(exc):
+        raise exc
+    logger.warning("database unavailable", extra={"error": type(exc).__name__})
+    problem = ProblemDetails(
+        title="Service Unavailable",
+        status=503,
+        detail="The database is unavailable. Retry later with the same Idempotency-Key.",
+    )
+    return JSONResponse(problem.model_dump(), status_code=503, media_type=PROBLEM_JSON)

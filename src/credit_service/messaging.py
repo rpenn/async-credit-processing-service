@@ -17,6 +17,11 @@ APPLY_CREDIT_TASK = "credit_service.apply_credit"
 # Run by Celery beat on a schedule; see beat_schedule below.
 RECONCILE_CREDITS_TASK = "credit_service.reconcile_credits"
 
+# How long a publish waits for RabbitMQ to confirm it. Without a limit, a publish on a
+# connection that died silently (half-open) waits until the operating system notices,
+# which can take many minutes.
+PUBLISH_CONFIRM_TIMEOUT_SECONDS = 5
+
 # Must match the policy pattern in rabbitmq/definitions.json, which adds the delivery limit
 # and the dead-letter exchange to this queue.
 TASK_QUEUE = "credits"
@@ -66,6 +71,19 @@ def create_celery_app(settings: Settings) -> Celery:
         },
     )
     return app
+
+
+def publish_apply_credit(celery: Celery, credit_id: str) -> None:
+    """Queue a credit for the worker. Blocking; raises if the broker does not confirm in time.
+
+    By name, so the API never imports worker code. The task ID is the credit ID.
+    """
+    celery.send_task(
+        APPLY_CREDIT_TASK,
+        args=[credit_id],
+        task_id=credit_id,
+        confirm_timeout=PUBLISH_CONFIRM_TIMEOUT_SECONDS,
+    )
 
 
 @before_task_publish.connect

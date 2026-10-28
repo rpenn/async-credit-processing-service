@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     max_credit_amount: Amount = Decimal("1000000.00")
 
     # Reconciler: every interval, re-enqueue credits still pending after the threshold.
-    # The threshold must outlast the worker's own retries (about 90 s at worst), or the
+    # The threshold must outlast the worker's own retries (under 4 minutes at worst), or the
     # reconciler re-enqueues credits the worker is still retrying (harmless, but wasted).
     reconcile_interval_seconds: PositiveInt = 60
     reconcile_stale_after_seconds: PositiveInt = 300

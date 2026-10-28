@@ -6,12 +6,12 @@ from celery import Task
 from celery.exceptions import Reject
 from pymongo.client_session import ClientSession
 from pymongo.database import Database
-from pymongo.errors import ConnectionFailure, PyMongoError
+from pymongo.errors import PyMongoError
 
-from credit_service.messaging import APPLY_CREDIT_TASK, RECONCILE_CREDITS_TASK
+from credit_service.messaging import APPLY_CREDIT_TASK, RECONCILE_CREDITS_TASK, publish_apply_credit
 from credit_service.models import CreditStatus
 from credit_service.money import from_decimal128
-from credit_service.mongo import Document, utc_now
+from credit_service.mongo import Document, is_transient, utc_now
 from credit_service.worker import repository
 from credit_service.worker.app import app, settings
 from credit_service.worker.database import get_client, get_database
@@ -20,8 +20,11 @@ logger = logging.getLogger(__name__)
 
 # Bounds one attempt, including with_transaction's own retries (otherwise up to 120 s).
 ATTEMPT_TIMEOUT_SECONDS = 10
-# Retries after transient errors, waiting 1, 2, 4, 8, then 16 seconds (31 s in total).
-MAX_RETRIES = 5
+# Retries after transient errors, waiting 1, 2, 4, ... 64 seconds (127 s in total). The
+# retries must outlast a transaction left open by a killed worker, which blocks the credit
+# until MongoDB aborts it: up to 90 s by default (transactionLifetimeLimitSeconds, 60, plus
+# up to half that again before the cleanup pass runs). Measured: 88 s.
+MAX_RETRIES = 7
 
 
 class UnknownCreditError(Exception):
@@ -50,7 +53,7 @@ def apply_credit(self: "Task[[str], None]", credit_id: str) -> None:
         )
         raise Reject(f"unknown credit {credit_id}", requeue=False) from None
     except PyMongoError as exc:
-        if not _is_transient(exc):
+        if not is_transient(exc):
             raise  # rejected to the dead-letter queue (task_acks_on_failure_or_timeout=False)
         if self.request.retries < MAX_RETRIES:
             # Whole seconds: native delayed delivery truncates fractions.
@@ -107,7 +110,7 @@ def reconcile_credits() -> None:
         for credit in repository.find_stale_pending_credits(db, before):
             _reconcile(db, credit, now)
     except PyMongoError as exc:
-        if not _is_transient(exc):
+        if not is_transient(exc):
             raise
         # Nothing to retry here: the credits are still pending, so the next run sees them.
         logger.warning("reconciler stopped early, the next run continues: %s", type(exc).__name__)
@@ -131,7 +134,7 @@ def _reconcile(db: Database[Document], credit: Document, now: datetime) -> None:
     # Count the attempt before publishing: if the publish then fails, the attempt is used
     # up but the credit stays pending, so the limit still ends it.
     if repository.claim_for_retry(db, credit, now):
-        apply_credit.apply_async(args=(credit_id,), task_id=credit_id)
+        publish_apply_credit(app, credit_id)
         logger.info(
             "credit re-enqueued by the reconciler",
             extra={"event": "credit_reconciled", "credit_id": credit_id, "attempt": attempts + 1},
@@ -160,12 +163,3 @@ def _finish(credit_id: str, status: CreditStatus) -> Document | None:
 
     with pymongo.timeout(ATTEMPT_TIMEOUT_SECONDS), get_client().start_session() as session:
         return session.with_transaction(finish)
-
-
-def _is_transient(exc: PyMongoError) -> bool:
-    """Errors worth retrying later: MongoDB unreachable, too slow, or a write conflict."""
-    return (
-        isinstance(exc, ConnectionFailure)
-        or exc.timeout
-        or exc.has_error_label("TransientTransactionError")
-    )

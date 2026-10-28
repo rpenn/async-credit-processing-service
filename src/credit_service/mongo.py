@@ -9,10 +9,16 @@ from typing import Any
 from pymongo import ASCENDING, AsyncMongoClient, IndexModel, MongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.database import Database
+from pymongo.errors import ConnectionFailure, PyMongoError
 
 from credit_service.settings import Settings
 
 type Document = dict[str, Any]
+
+# Every MongoDB call gives up after this long, finding a server included (PyMongo's
+# client-side operation timeout, timeoutMS). Without it, a call on a connection that died
+# silently (half-open) waits forever. A pymongo.timeout() block sets its own deadline instead.
+TIMEOUT_SECONDS = 5
 
 USERS = "users"
 CREDITS = "credits"
@@ -40,11 +46,24 @@ def utc_now() -> datetime:
 
 
 def create_async_client(settings: Settings) -> AsyncMongoClient[Document]:
-    return AsyncMongoClient(settings.mongo_uri.get_secret_value(), tz_aware=True)
+    return AsyncMongoClient(
+        settings.mongo_uri.get_secret_value(), tz_aware=True, timeoutMS=TIMEOUT_SECONDS * 1000
+    )
 
 
 def create_sync_client(settings: Settings) -> MongoClient[Document]:
-    return MongoClient(settings.mongo_uri.get_secret_value(), tz_aware=True)
+    return MongoClient(
+        settings.mongo_uri.get_secret_value(), tz_aware=True, timeoutMS=TIMEOUT_SECONDS * 1000
+    )
+
+
+def is_transient(exc: PyMongoError) -> bool:
+    """Errors worth retrying later: MongoDB unreachable, too slow, or a write conflict."""
+    return (
+        isinstance(exc, ConnectionFailure)
+        or exc.timeout
+        or exc.has_error_label("TransientTransactionError")
+    )
 
 
 async def ensure_indexes_async(db: AsyncDatabase[Document]) -> None:

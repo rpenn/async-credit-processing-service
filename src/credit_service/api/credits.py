@@ -3,6 +3,7 @@ import logging
 import uuid
 from typing import Annotated
 
+import pymongo
 from celery import Celery
 from fastapi import APIRouter, Depends, Header, Request, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -13,10 +14,10 @@ from pymongo.errors import DuplicateKeyError
 from credit_service.api import repository
 from credit_service.api.decimal_json import DecimalJSONRoute
 from credit_service.api.problems import PROBLEM_RESPONSE, ProblemDetails, ProblemError
-from credit_service.messaging import APPLY_CREDIT_TASK
+from credit_service.messaging import publish_apply_credit
 from credit_service.models import CreditRequest, CreditResponse
 from credit_service.money import from_decimal128
-from credit_service.mongo import Document, utc_now
+from credit_service.mongo import TIMEOUT_SECONDS, Document, utc_now
 from credit_service.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -100,8 +101,12 @@ async def create_credit(
             )
 
     try:
-        async with mongo.start_session() as session:
-            await session.with_transaction(accept)
+        # One deadline for the whole transaction: with_transaction would otherwise keep
+        # retrying for up to 120 s while MongoDB is unreachable. On timeout the client gets a
+        # 503 (see problems.py) and can safely retry with the same Idempotency-Key.
+        with pymongo.timeout(TIMEOUT_SECONDS):
+            async with mongo.start_session() as session:
+                await session.with_transaction(accept)
     except DuplicateKeyError:
         # The key belongs to a credit that has already committed: until a transaction
         # commits, a concurrent one with the same key gets a write conflict and is retried.
@@ -156,12 +161,10 @@ async def _publish(celery: Celery, credit_id: str) -> None:
 
     If the broker is down, the credit is still safely stored as pending, and the reconciler
     re-enqueues it later. Publishing first could enqueue a credit that then fails to commit.
-    send_task blocks, so it runs in a thread to keep the event loop free.
+    Publishing blocks, so it runs in a thread to keep the event loop free.
     """
     try:
-        await asyncio.to_thread(
-            celery.send_task, APPLY_CREDIT_TASK, args=[credit_id], task_id=credit_id
-        )
+        await asyncio.to_thread(publish_apply_credit, celery, credit_id)
     except Exception as exc:  # kombu raises many unrelated types when the broker is down
         logger.warning(
             "credit publish failed, left for the reconciler",
