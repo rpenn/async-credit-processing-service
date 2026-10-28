@@ -9,6 +9,8 @@ x-app: &app
   environment:
     MONGO_URI: mongodb://mongo:27017/credit_service?replicaSet=rs0
     BROKER_URL: amqp://${RABBITMQ_USER:?set in .env}:${RABBITMQ_PASSWORD:?set in .env}@rabbitmq:5672//
+    # Largest amount one credit may have. Same default as settings.py.
+    MAX_CREDIT_AMOUNT: ${MAX_CREDIT_AMOUNT:-1000000.00}
   depends_on:
     mongo:
       condition: service_healthy
@@ -53,8 +55,19 @@ services:
       - "127.0.0.1:15672:15672"  # management UI
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      # Healthy once the node accepts connections and the topology in definitions.json (the
+      # dead-letter queue and the policy on the task queue) is loaded. It is imported here,
+      # not at boot: a boot-time import would skip creating RABBITMQ_DEFAULT_USER.
+      # Imported only while the policy is missing, since each import logs several lines.
+      # After editing the file, run the import_definitions command below by hand.
+      test:
+        - CMD-SHELL
+        - >-
+          rabbitmq-diagnostics -q check_port_connectivity &&
+          { rabbitmqctl -q list_policies | grep -qw credits ||
+          rabbitmqctl -q import_definitions /etc/rabbitmq/definitions.json; }
       interval: 10s
       timeout: 10s
       retries: 10
