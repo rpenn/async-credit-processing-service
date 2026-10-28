@@ -1,0 +1,6 @@
+[
+  { "name": "api_mongo", "listen": "0.0.0.0:20017", "upstream": "mongo:27017", "enabled": true },
+  { "name": "api_rabbitmq", "listen": "0.0.0.0:20672", "upstream": "rabbitmq:5672", "enabled": true },
+  { "name": "worker_mongo", "listen": "0.0.0.0:21017", "upstream": "mongo:27017", "enabled": true },
+  { "name": "worker_rabbitmq", "listen": "0.0.0.0:21672", "upstream": "rabbitmq:5672", "enabled": true }
+]

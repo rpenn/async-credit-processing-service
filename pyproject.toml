@@ -55,5 +55,7 @@ files = ["src", "tests"]  # so a plain `mypy` checks everything, from local sour
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers", "--strict-config"]
+# Chaos tests start their own Compose stack and take minutes: run them with `-m chaos`.
+addopts = ["--strict-markers", "--strict-config", "-m", "not chaos"]
+markers = ["chaos: injects real failures into a Compose stack (tests/chaos)"]
 filterwarnings = ["error"]  # surface deprecations early instead of ignoring them

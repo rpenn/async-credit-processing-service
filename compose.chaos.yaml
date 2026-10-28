@@ -1,0 +1,65 @@
+# Chaos tests only. The main stack never uses this file.
+# `uv run pytest -m chaos` starts it as its own Compose project, so the dev stack keeps
+# running and its data is untouched:
+#   docker compose -p credit-service-chaos -f compose.yaml -f compose.chaos.yaml up -d --wait api worker
+#
+# The API and the worker reach MongoDB and RabbitMQ through Toxiproxy, one proxy per link
+# (see tests/chaos/toxiproxy.json), so a test can break one link and leave the others alone.
+# Only environment variables change; the application code is the same.
+# Beat is not started: tests run the reconciler when they need it, so its timing is exact.
+
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    user: "65534:65534"  # nobody; the image defaults to root
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./tests/chaos/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "127.0.0.1:18474:8474"  # Toxiproxy's HTTP API, used by the tests
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  mongo:
+    # A transaction left open by a killed worker blocks the credit until MongoDB aborts it,
+    # after transactionLifetimeLimitSeconds (default 60) plus up to half that again for the
+    # cleanup pass. 5 s here keeps the tests quick; see the README's failure-mode table.
+    command:
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --setParameter
+      - transactionLifetimeLimitSeconds=5
+    # Different host ports from the dev stack, so both can run at once.
+    ports: !override
+      - "127.0.0.1:28017:27017"
+
+  rabbitmq:
+    ports: !override
+      - "127.0.0.1:25672:15672"  # management HTTP API: queue depths
+
+  api:
+    environment:
+      # directConnection: talk to this address only. Otherwise the driver would discover the
+      # replica set member by its own name (mongo:27017) and bypass the proxy.
+      MONGO_URI: mongodb://toxiproxy:20017/credit_service?directConnection=true
+      BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@toxiproxy:20672//
+    ports: !override
+      - "127.0.0.1:18000:8000"
+    depends_on:
+      toxiproxy:
+        condition: service_healthy
+
+  worker:
+    environment:
+      MONGO_URI: mongodb://toxiproxy:21017/credit_service?directConnection=true
+      BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@toxiproxy:21672//
+      # Credits count as stuck after 1 s, and one re-enqueue is the limit.
+      RECONCILE_STALE_AFTER_SECONDS: 1
+      RECONCILE_MAX_ATTEMPTS: 1
+    depends_on:
+      toxiproxy:
+        condition: service_healthy
