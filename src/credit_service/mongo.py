@@ -3,6 +3,7 @@
 The database name comes from the connection string path, e.g. mongodb://host/credit_service.
 """
 
+from datetime import UTC, datetime
 from typing import Any
 
 from pymongo import ASCENDING, AsyncMongoClient, IndexModel, MongoClient
@@ -30,6 +31,12 @@ CREDIT_INDEXES = [
     # The reconciler looks for credits still pending after a threshold.
     IndexModel([("status", ASCENDING), ("updated_at", ASCENDING)], name="status_updated_at"),
 ]
+
+
+def utc_now() -> datetime:
+    """Current UTC time at BSON's millisecond precision, so responses match what is stored."""
+    now = datetime.now(UTC)
+    return now.replace(microsecond=now.microsecond // 1000 * 1000)
 
 
 def create_async_client(settings: Settings) -> AsyncMongoClient[Document]:
