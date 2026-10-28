@@ -1,37 +1,31 @@
-from collections.abc import Iterator
-
-import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from credit_service.api.main import create_app
 from credit_service.settings import Settings
 
-# Port 1 is never listening, so both dependencies are unreachable.
-UNREACHABLE = Settings(
-    mongo_uri=SecretStr("mongodb://127.0.0.1:1/"),
-    broker_url=SecretStr("amqp://guest:guest@127.0.0.1:1//"),
-)
+
+def test_live_and_ready_with_real_dependencies(settings: Settings) -> None:
+    with TestClient(create_app(settings)) as client:
+        live = client.get("/health/live")
+        ready = client.get("/health/ready")
+
+    assert live.status_code == 200
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ok", "checks": {"mongodb": "ok", "broker": "ok"}}
 
 
-@pytest.fixture
-def client() -> Iterator[TestClient]:
-    with TestClient(create_app(UNREACHABLE)) as client:
-        yield client
+def test_ready_returns_503_when_broker_is_unreachable(settings: Settings) -> None:
+    # Port 1 is never listening.
+    broken = settings.model_copy(update={"broker_url": SecretStr("amqp://test:test@127.0.0.1:1//")})
 
+    with TestClient(create_app(broken)) as client:
+        live = client.get("/health/live")
+        ready = client.get("/health/ready")
 
-def test_live_does_not_depend_on_mongodb_or_broker(client: TestClient) -> None:
-    response = client.get("/health/live")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-
-def test_ready_returns_503_when_dependencies_are_down(client: TestClient) -> None:
-    response = client.get("/health/ready")
-
-    assert response.status_code == 503
-    assert response.json() == {
+    assert live.status_code == 200
+    assert ready.status_code == 503
+    assert ready.json() == {
         "status": "unavailable",
-        "checks": {"mongodb": "error", "broker": "error"},
+        "checks": {"mongodb": "ok", "broker": "error"},
     }
