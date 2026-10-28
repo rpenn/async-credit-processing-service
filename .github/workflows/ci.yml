@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: MongoDB 8.0.34 misreads that runner's kernel version (7.0.0-azure)
+    # and refuses to start (SERVER-131779; https://github.com/actions/runner-images/issues/15005).
+    # Move back once the tests use MongoDB 8.0.35, which has the fix.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       # Actions are pinned to a commit SHA: a tag can be moved, a commit cannot.
