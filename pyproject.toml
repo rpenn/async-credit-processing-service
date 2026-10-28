@@ -51,7 +51,7 @@ select = [
 [tool.mypy]
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["src", "tests"]  # so a plain `mypy` checks everything, from local source
+files = ["src", "tests", "scripts"]  # so a plain `mypy` checks everything, from local source
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
