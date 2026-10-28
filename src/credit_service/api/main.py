@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
 from credit_service.api import credits, health
+from credit_service.api.correlation import CorrelationIdMiddleware
 from credit_service.api.problems import ProblemError, problem_handler, validation_error_handler
 from credit_service.messaging import create_celery_app
 from credit_service.mongo import create_async_client, ensure_indexes_async
@@ -35,6 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             RequestValidationError: validation_error_handler,
         },
     )
+    app.add_middleware(CorrelationIdMiddleware)
     app.include_router(health.router)
     app.include_router(credits.router)
     return app

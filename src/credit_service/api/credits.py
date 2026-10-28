@@ -111,7 +111,15 @@ async def create_credit(
             raise
         _ensure_same_request(original, body)
         credit = original  # replay; the original request already published (or tried to)
+        logger.info(
+            "credit replayed for a reused Idempotency-Key",
+            extra={"event": "credit_replayed", "credit_id": credit["_id"]},
+        )
     else:
+        logger.info(
+            "credit accepted",
+            extra={"event": "credit_accepted", "credit_id": credit["_id"], "user_id": body.user_id},
+        )
         await _publish(celery, credit["_id"])
 
     response.headers["Location"] = str(
@@ -156,7 +164,12 @@ async def _publish(celery: Celery, credit_id: str) -> None:
         )
     except Exception as exc:  # kombu raises many unrelated types when the broker is down
         logger.warning(
-            "publish failed for credit %s, left for the reconciler: %s",
-            credit_id,
-            type(exc).__name__,
+            "credit publish failed, left for the reconciler",
+            extra={
+                "event": "credit_publish_failed",
+                "credit_id": credit_id,
+                "error": type(exc).__name__,
+            },
         )
+    else:
+        logger.info("credit published", extra={"event": "credit_published", "credit_id": credit_id})

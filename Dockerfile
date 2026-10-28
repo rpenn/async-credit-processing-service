@@ -38,4 +38,5 @@ USER app
 WORKDIR /app
 EXPOSE 8000
 
-CMD ["uvicorn", "credit_service.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# The worker and beat services override this command in compose.yaml.
+CMD ["python", "-m", "credit_service.api"]

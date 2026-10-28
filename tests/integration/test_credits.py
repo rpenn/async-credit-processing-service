@@ -12,6 +12,7 @@ from pymongo.database import Database
 
 from credit_service.api.credits import IDEMPOTENCY_KEY_REUSED
 from credit_service.api.main import create_app
+from credit_service.logs import JsonFormatter
 from credit_service.messaging import APPLY_CREDIT_TASK, create_celery_app
 from credit_service.mongo import CREDITS, USERS, Document
 from credit_service.settings import Settings
@@ -218,5 +219,27 @@ def test_publish_failure_still_accepts_a_durable_pending_credit(
     assert credit is not None
     assert credit["status"] == "pending"
     assert _user(db) == {"user_id": USER, "pending_credits": 1, "status": "processing"}
-    assert f"publish failed for credit {credit_id}" in caplog.text
-    assert "test:test" not in caplog.text  # no broker credentials in logs
+    [failed] = [r for r in caplog.records if vars(r).get("event") == "credit_publish_failed"]
+    assert vars(failed)["credit_id"] == credit_id
+    # No broker credentials in logs, including the JSON line with every extra field.
+    assert "test:test" not in caplog.text
+    assert "test:test" not in JsonFormatter().format(failed)
+
+
+def test_a_valid_client_correlation_id_is_returned(client: TestClient) -> None:
+    response = client.get("/health/live", headers={"X-Correlation-ID": "req-123"})
+
+    assert response.headers["x-correlation-id"] == "req-123"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"X-Correlation-ID": "has spaces"}, {"X-Correlation-ID": "x" * 65}],
+    ids=["missing", "invalid-characters", "too-long"],
+)
+def test_otherwise_a_new_correlation_id_is_generated(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    response = client.get("/health/live", headers=headers)
+
+    uuid.UUID(response.headers["x-correlation-id"])  # raises if it is not a UUID

@@ -4,8 +4,12 @@ Both sides need the same queue settings, so all configuration lives here. The AP
 publishes tasks by name, so it never imports worker code.
 """
 
-from celery import Celery
+from typing import Any
 
+from celery import Celery
+from celery.signals import before_task_publish
+
+from credit_service.logs import CORRELATION_ID_HEADER, correlation_id
 from credit_service.settings import Settings
 
 # The worker registers its task under this name; the API publishes to it with send_task.
@@ -62,3 +66,14 @@ def create_celery_app(settings: Settings) -> Celery:
         },
     )
     return app
+
+
+@before_task_publish.connect
+def _add_correlation_id(headers: dict[str, Any], **_: Any) -> None:
+    """Carry the current correlation ID (of the HTTP request or task) in every task message.
+
+    Covers the API's publish, the reconciler's re-enqueues, and the worker's retries.
+    """
+    value = correlation_id.get()
+    if value is not None:
+        headers[CORRELATION_ID_HEADER] = value

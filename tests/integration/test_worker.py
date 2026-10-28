@@ -31,6 +31,7 @@ from pymongo.database import Database
 from pymongo.errors import AutoReconnect
 
 from credit_service.api.main import create_app
+from credit_service.logs import correlation_id
 from credit_service.messaging import APPLY_CREDIT_TASK, TASK_QUEUE
 from credit_service.models import CreditStatus
 from credit_service.mongo import CREDITS, USERS, Document, utc_now
@@ -201,6 +202,29 @@ def test_unprocessable_messages_go_to_the_dead_letter_queue(
 
     assert message.headers["id"] == task_id
     assert message.headers["x-first-death-reason"] == "rejected"
+
+
+def test_the_request_correlation_id_reaches_the_worker(
+    client: TestClient, user_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the task message header, so the worker's log lines carry the request's ID."""
+    seen = []
+    original = repository.finish_pending_credit
+
+    def record_correlation_id(*args: Any) -> Document | None:
+        seen.append(correlation_id.get())
+        return original(*args)
+
+    monkeypatch.setattr(repository, "finish_pending_credit", record_correlation_id)
+
+    response = client.post(
+        "/credits",
+        json={"user_id": user_id, "amount": "1.00"},
+        headers={"X-Correlation-ID": "trace-me"},
+    )
+
+    assert _wait_until_finished(client, response.json()["credit_id"]) == "applied"
+    assert seen == ["trace-me"]
 
 
 def _make_stale(db: Database[Document], credit_id: str, **fields: Any) -> None:

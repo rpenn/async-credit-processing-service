@@ -37,25 +37,58 @@ def apply_credit(self: "Task[[str], None]", credit_id: str) -> None:
     A redelivered or re-enqueued message finds the credit no longer pending and does nothing.
     """
     if not isinstance(credit_id, str):
+        logger.error(
+            "credit rejected: credit_id is not a string", extra={"event": "credit_rejected"}
+        )
         raise Reject("credit_id must be a string", requeue=False)  # to the dead-letter queue
     try:
-        _finish(credit_id, CreditStatus.APPLIED)
+        credit = _finish(credit_id, CreditStatus.APPLIED)
     except UnknownCreditError:
+        logger.error(
+            "credit rejected: unknown credit_id",
+            extra={"event": "credit_rejected", "credit_id": credit_id},
+        )
         raise Reject(f"unknown credit {credit_id}", requeue=False) from None
     except PyMongoError as exc:
         if not _is_transient(exc):
             raise  # rejected to the dead-letter queue (task_acks_on_failure_or_timeout=False)
         if self.request.retries < MAX_RETRIES:
             # Whole seconds: native delayed delivery truncates fractions.
-            raise self.retry(exc=exc, countdown=2**self.request.retries) from exc
-        # If this write fails too, the credit stays pending and the reconciler fails it later.
-        if _finish(credit_id, CreditStatus.FAILED):
-            logger.error(
-                "credit %s failed after %d retries",
-                credit_id,
-                self.request.retries,
-                extra={"event": "credit_failed", "credit_id": credit_id},
+            countdown = 2**self.request.retries
+            logger.warning(
+                "credit retry scheduled",
+                extra={
+                    "event": "credit_retry_scheduled",
+                    "credit_id": credit_id,
+                    "retry": self.request.retries + 1,
+                    "countdown_seconds": countdown,
+                    "error": type(exc).__name__,
+                },
             )
+            raise self.retry(exc=exc, countdown=countdown) from exc
+        # If this write fails too, the credit stays pending and the reconciler fails it later.
+        if failed := _finish(credit_id, CreditStatus.FAILED):
+            logger.error(
+                "credit failed, retries used up",
+                extra={
+                    "event": "credit_failed",
+                    "credit_id": credit_id,
+                    "user_id": failed["user_id"],
+                    "retries": self.request.retries,
+                },
+            )
+        return
+
+    if credit is None:
+        logger.info(
+            "credit already finished, duplicate delivery skipped",
+            extra={"event": "credit_duplicate_skipped", "credit_id": credit_id},
+        )
+    else:
+        logger.info(
+            "credit applied",
+            extra={"event": "credit_applied", "credit_id": credit_id, "user_id": credit["user_id"]},
+        )
 
 
 @app.task(name=RECONCILE_CREDITS_TASK)
@@ -84,40 +117,46 @@ def _reconcile(db: Database[Document], credit: Document, now: datetime) -> None:
     credit_id: str = credit["_id"]
     attempts: int = credit["attempts"]
     if attempts >= settings.reconcile_max_attempts:
-        if _finish(credit_id, CreditStatus.FAILED):
+        if failed := _finish(credit_id, CreditStatus.FAILED):
             logger.error(
-                "credit %s failed, still pending after %d reconciler attempts",
-                credit_id,
-                attempts,
-                extra={"event": "credit_failed", "credit_id": credit_id},
+                "credit failed, still pending after the reconciler's last attempt",
+                extra={
+                    "event": "credit_failed",
+                    "credit_id": credit_id,
+                    "user_id": failed["user_id"],
+                    "attempts": attempts,
+                },
             )
         return
     # Count the attempt before publishing: if the publish then fails, the attempt is used
     # up but the credit stays pending, so the limit still ends it.
     if repository.claim_for_retry(db, credit, now):
         apply_credit.apply_async(args=(credit_id,), task_id=credit_id)
-        logger.info("credit %s re-enqueued, attempt %d", credit_id, attempts + 1)
+        logger.info(
+            "credit re-enqueued by the reconciler",
+            extra={"event": "credit_reconciled", "credit_id": credit_id, "attempt": attempts + 1},
+        )
 
 
-def _finish(credit_id: str, status: CreditStatus) -> bool:
+def _finish(credit_id: str, status: CreditStatus) -> Document | None:
     """In one transaction, move the credit out of pending and release the user's reservation.
 
     Only an applied credit changes the balance. Either way the user's pending_credits goes
-    down by one, and the user becomes `processed` when it reaches zero. Returns False if the
-    credit was no longer pending (an earlier delivery already finished it).
+    down by one, and the user becomes `processed` when it reaches zero. Returns the credit,
+    or None if it was no longer pending (an earlier delivery already finished it).
     """
     db = get_database()
 
     # with_transaction reruns this on transient errors, so it only touches the database.
-    def finish(session: ClientSession) -> bool:
+    def finish(session: ClientSession) -> Document | None:
         credit = repository.finish_pending_credit(db, session, credit_id, status, utc_now())
         if credit is None:
             if repository.find_credit(db, session, credit_id) is None:
                 raise UnknownCreditError(credit_id)
-            return False
+            return None
         amount = from_decimal128(credit["amount"]) if status is CreditStatus.APPLIED else None
         repository.release_user(db, session, credit["user_id"], amount)
-        return True
+        return credit
 
     with pymongo.timeout(ATTEMPT_TIMEOUT_SECONDS), get_client().start_session() as session:
         return session.with_transaction(finish)

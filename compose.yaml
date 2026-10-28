@@ -95,9 +95,17 @@ services:
 
   worker:
     <<: *app
+    # --quiet: no startup banner, which Celery prints as plain text, so every line is JSON.
     # Gossip (worker-to-worker event sharing) is unused, and its queue is the same
     # non-durable, non-exclusive kind that RabbitMQ 4.3 refuses.
-    command: ["celery", "-A", "credit_service.worker.app", "worker", "--loglevel=INFO", "--without-gossip"]
+    command:
+      - celery
+      - --quiet
+      - -A
+      - credit_service.worker.app
+      - worker
+      - --loglevel=INFO
+      - --without-gossip
     healthcheck:
       test: ["CMD-SHELL", "celery -A credit_service.worker.app inspect ping -d celery@$$HOSTNAME --timeout 5"]
       interval: 30s
@@ -108,8 +116,10 @@ services:
   beat:
     <<: *app
     # The schedule state file goes to /tmp because the app user cannot write to /app.
+    # --quiet: no startup banner, as for the worker.
     command:
       - celery
+      - --quiet
       - -A
       - credit_service.worker.app
       - beat
