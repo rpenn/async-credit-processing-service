@@ -7,6 +7,7 @@ Uses testcontainers' generic DockerContainer: its MongoDB module cannot start a 
 import time
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
@@ -22,6 +23,7 @@ from credit_service.settings import Settings
 # Keep in step with compose.yaml.
 MONGO_IMAGE = "mongo:8.0.34"
 RABBITMQ_IMAGE = "rabbitmq:4.3.7-management"
+RABBITMQ_DEFINITIONS = Path(__file__).parents[2] / "rabbitmq" / "definitions.json"
 
 
 @pytest.fixture(scope="session")
@@ -69,9 +71,15 @@ def broker_url() -> Iterator[str]:
         .with_env("RABBITMQ_DEFAULT_USER", "test")
         .with_env("RABBITMQ_DEFAULT_PASS", "test")
         .with_exposed_ports(5672, 15672)
+        .with_volume_mapping(str(RABBITMQ_DEFINITIONS), "/etc/rabbitmq/definitions.json")
         .waiting_for(LogMessageWaitStrategy("Server startup complete"))
     )
     with container:
+        # The same import the Compose healthcheck runs: dead-letter queue and queue policy.
+        exit_code, output = container.exec(
+            ["rabbitmqctl", "-q", "import_definitions", "/etc/rabbitmq/definitions.json"]
+        )
+        assert exit_code == 0, output
         host = container.get_container_host_ip()
         port = container.get_exposed_port(5672)
         yield f"amqp://test:test@{host}:{port}//"
