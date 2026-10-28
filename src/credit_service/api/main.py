@@ -1,12 +1,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 
 from fastapi import FastAPI
-from pymongo import AsyncMongoClient
 
 from credit_service.api import health
 from credit_service.messaging import create_celery_app
+from credit_service.mongo import create_async_client, ensure_indexes_async
 from credit_service.settings import Settings
 
 
@@ -16,9 +15,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        mongo: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(
-            settings.mongo_uri.get_secret_value()
-        )
+        mongo = create_async_client(settings)
+        # Fail startup (and let the container restart) rather than serve without indexes:
+        # the unique indexes are what enforce one user per user_id and one credit per key.
+        await ensure_indexes_async(mongo.get_default_database())
         app.state.mongo = mongo
         app.state.celery = create_celery_app(settings)
         yield

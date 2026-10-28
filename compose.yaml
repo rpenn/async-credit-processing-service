@@ -7,7 +7,7 @@ x-app: &app
   image: credit-service:local
   restart: unless-stopped
   environment:
-    MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
+    MONGO_URI: mongodb://mongo:27017/credit_service?replicaSet=rs0
     BROKER_URL: amqp://${RABBITMQ_USER:?set in .env}:${RABBITMQ_PASSWORD:?set in .env}@rabbitmq:5672//
   depends_on:
     mongo:
@@ -20,6 +20,10 @@ services:
     image: mongo:8.0.34
     # Transactions need a replica set; a single node is enough locally.
     command: ["--replSet", "rs0", "--bind_ip_all"]
+    # Local-only, for MongoDB Compass or mongosh. No auth, so never bind beyond 127.0.0.1.
+    # Connect with ?directConnection=true: the replica set member is named "mongo".
+    ports:
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo-data:/data/db
     healthcheck:
