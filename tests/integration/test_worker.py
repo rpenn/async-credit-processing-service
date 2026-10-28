@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import ModuleType
 from typing import Any
 
@@ -33,7 +33,7 @@ from pymongo.errors import AutoReconnect
 from credit_service.api.main import create_app
 from credit_service.messaging import APPLY_CREDIT_TASK, TASK_QUEUE
 from credit_service.models import CreditStatus
-from credit_service.mongo import USERS, Document
+from credit_service.mongo import CREDITS, USERS, Document, utc_now
 from credit_service.settings import Settings
 from credit_service.worker import database, repository
 
@@ -201,6 +201,113 @@ def test_unprocessable_messages_go_to_the_dead_letter_queue(
 
     assert message.headers["id"] == task_id
     assert message.headers["x-first-death-reason"] == "rejected"
+
+
+def _make_stale(db: Database[Document], credit_id: str, **fields: Any) -> None:
+    """As if the credit had been pending for an hour, well past the reconciler's threshold."""
+    db[CREDITS].update_one(
+        {"_id": credit_id}, {"$set": {"updated_at": utc_now() - timedelta(hours=1), **fields}}
+    )
+
+
+def _credit(db: Database[Document], credit_id: str) -> Document | None:
+    return db[CREDITS].find_one({"_id": credit_id}, {"_id": 0, "status": 1, "attempts": 1})
+
+
+def test_reconciler_re_enqueues_a_stale_credit_and_it_is_applied_once(
+    settings: Settings,
+    client: TestClient,
+    db: Database[Document],
+    user_id: str,
+    tasks: ModuleType,
+) -> None:
+    with TestClient(create_app(_without_broker(settings))) as unqueued:
+        credit_id = _post(unqueued, user_id, "7.00")
+    _make_stale(db, credit_id)
+
+    tasks.reconcile_credits.apply()
+    assert _wait_until_finished(client, credit_id) == "applied"
+    tasks.reconcile_credits.apply()  # the credit is no longer pending, so nothing happens
+
+    assert _credit(db, credit_id) == {"status": "applied", "attempts": 1}
+    assert _user(db, user_id) == {
+        "pending_credits": 0,
+        "status": "processed",
+        "balance": Decimal128("7.00"),
+    }
+
+
+def test_overlapping_reconciler_runs_claim_a_credit_once(
+    settings: Settings, db: Database[Document], user_id: str
+) -> None:
+    with TestClient(create_app(_without_broker(settings))) as unqueued:
+        credit_id = _post(unqueued, user_id, "7.00")
+    _make_stale(db, credit_id)
+    # Both runs read the same stale credit before either claims it.
+    [credit] = [
+        c for c in repository.find_stale_pending_credits(db, utc_now()) if c["_id"] == credit_id
+    ]
+
+    assert repository.claim_for_retry(db, credit, utc_now()) is True
+    assert repository.claim_for_retry(db, credit, utc_now()) is False
+    assert _credit(db, credit_id) == {"status": "pending", "attempts": 1}
+
+
+def test_reconciler_leaves_fresh_pending_credits_alone(
+    settings: Settings, db: Database[Document], user_id: str, tasks: ModuleType
+) -> None:
+    with TestClient(create_app(_without_broker(settings))) as unqueued:
+        credit_id = _post(unqueued, user_id, "7.00")
+
+    tasks.reconcile_credits.apply()
+
+    assert _credit(db, credit_id) == {"status": "pending", "attempts": 0}
+
+
+def test_reconciler_fails_a_credit_at_the_attempt_limit(
+    settings: Settings,
+    db: Database[Document],
+    user_id: str,
+    tasks: ModuleType,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with TestClient(create_app(_without_broker(settings))) as unqueued:
+        credit_id = _post(unqueued, user_id, "7.00")
+    max_attempts = tasks.settings.reconcile_max_attempts
+    _make_stale(db, credit_id, attempts=max_attempts)
+
+    tasks.reconcile_credits.apply()
+
+    assert _credit(db, credit_id) == {"status": "failed", "attempts": max_attempts}
+    assert _user(db, user_id) == {"pending_credits": 0, "status": "processed"}  # no balance
+    [failed] = [r for r in caplog.records if vars(r).get("event") == "credit_failed"]
+    assert vars(failed)["credit_id"] == credit_id
+
+
+def test_reconciler_survives_a_database_error_and_the_next_run_continues(
+    settings: Settings,
+    client: TestClient,
+    db: Database[Document],
+    user_id: str,
+    tasks: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed run must not dead-letter its own message: the credit is still pending, so
+    the next scheduled run picks it up."""
+    with TestClient(create_app(_without_broker(settings))) as unqueued:
+        credit_id = _post(unqueued, user_id, "7.00")
+    _make_stale(db, credit_id)
+
+    def unreachable(*_: Any) -> bool:
+        raise AutoReconnect("injected: MongoDB unreachable")
+
+    monkeypatch.setattr(repository, "claim_for_retry", unreachable)
+    assert tasks.reconcile_credits.apply().successful()
+    assert _credit(db, credit_id) == {"status": "pending", "attempts": 0}
+
+    monkeypatch.undo()
+    tasks.reconcile_credits.apply()
+    assert _wait_until_finished(client, credit_id) == "applied"
 
 
 def test_transient_error_is_retried_after_a_delay(

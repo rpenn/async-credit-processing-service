@@ -1,15 +1,49 @@
-"""Sync data access for the worker. Every write runs inside the caller's transaction."""
+"""Sync data access for the worker.
+
+Writes that touch more than one document run inside the caller's transaction (they take its
+session). The reconciler's single-document writes do not need one.
+"""
 
 from datetime import datetime
 from decimal import Decimal
 
-from pymongo import ReturnDocument
+from pymongo import ASCENDING, ReturnDocument
 from pymongo.client_session import ClientSession
 from pymongo.database import Database
 
 from credit_service.models import CreditStatus, UserStatus
 from credit_service.money import to_decimal128
 from credit_service.mongo import CREDITS, USERS, Document
+
+# Bounds one reconciler run; whatever is left waits for the next run.
+RECONCILE_BATCH_SIZE = 500
+
+
+def find_stale_pending_credits(db: Database[Document], before: datetime) -> list[Document]:
+    """Pending credits last touched before `before`, oldest first (uses status_updated_at)."""
+    return (
+        db[CREDITS]
+        .find(
+            {"status": CreditStatus.PENDING, "updated_at": {"$lt": before}},
+            {"_id": 1, "updated_at": 1, "attempts": 1},
+        )
+        .sort("updated_at", ASCENDING)
+        .limit(RECONCILE_BATCH_SIZE)
+        .to_list()
+    )
+
+
+def claim_for_retry(db: Database[Document], credit: Document, now: datetime) -> bool:
+    """Count one more reconciler attempt. False if something touched the credit meanwhile.
+
+    Matching on the old updated_at makes this a compare-and-set: if two reconciler runs
+    overlap, only one claims the credit, so `attempts` is never counted twice.
+    """
+    result = db[CREDITS].update_one(
+        {"_id": credit["_id"], "status": CreditStatus.PENDING, "updated_at": credit["updated_at"]},
+        {"$inc": {"attempts": 1}, "$set": {"updated_at": now}},
+    )
+    return result.modified_count == 1
 
 
 def find_credit(db: Database[Document], session: ClientSession, credit_id: str) -> Document | None:

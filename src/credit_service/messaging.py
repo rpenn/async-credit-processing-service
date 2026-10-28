@@ -10,6 +10,8 @@ from credit_service.settings import Settings
 
 # The worker registers its task under this name; the API publishes to it with send_task.
 APPLY_CREDIT_TASK = "credit_service.apply_credit"
+# Run by Celery beat on a schedule; see beat_schedule below.
+RECONCILE_CREDITS_TASK = "credit_service.reconcile_credits"
 
 # Must match the policy pattern in rabbitmq/definitions.json, which adds the delivery limit
 # and the dead-letter exchange to this queue.
@@ -48,5 +50,15 @@ def create_celery_app(settings: Settings) -> Celery:
         # Remote-control queues (used by `celery inspect ping`) are non-durable. RabbitMQ 4.3
         # refuses non-durable queues unless they are exclusive (`transient_nonexcl_queues`).
         control_queue_exclusive=True,
+        # Only the beat service reads this. The reconciler message expires after one
+        # interval, so runs queued while no worker is up are dropped (acked, not dead-lettered)
+        # instead of all running at once when one comes back.
+        beat_schedule={
+            "reconcile-credits": {
+                "task": RECONCILE_CREDITS_TASK,
+                "schedule": settings.reconcile_interval_seconds,
+                "options": {"expires": settings.reconcile_interval_seconds},
+            },
+        },
     )
     return app

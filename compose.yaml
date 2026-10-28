@@ -11,6 +11,10 @@ x-app: &app
     BROKER_URL: amqp://${RABBITMQ_USER:?set in .env}:${RABBITMQ_PASSWORD:?set in .env}@rabbitmq:5672//
     # Largest amount one credit may have. Same default as settings.py.
     MAX_CREDIT_AMOUNT: ${MAX_CREDIT_AMOUNT:-1000000.00}
+    # Reconciler (worker and beat). Same defaults as settings.py.
+    RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-60}
+    RECONCILE_STALE_AFTER_SECONDS: ${RECONCILE_STALE_AFTER_SECONDS:-300}
+    RECONCILE_MAX_ATTEMPTS: ${RECONCILE_MAX_ATTEMPTS:-3}
   depends_on:
     mongo:
       condition: service_healthy
