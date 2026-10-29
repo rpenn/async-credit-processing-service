@@ -74,6 +74,7 @@ def release_user(
     session: ClientSession,
     user_id: str,
     balance_change: Decimal | None,
+    now: datetime,
 ) -> None:
     """One in-flight credit finished: add it to the balance (if applied) and derive status.
 
@@ -87,7 +88,7 @@ def release_user(
     user = db[USERS].find_one_and_update(
         # pending_credits > 0 guards the counter: it can never go negative.
         {"user_id": user_id, "pending_credits": {"$gt": 0}},
-        {"$inc": increments},
+        {"$inc": increments, "$set": {"updated_at": now}},
         return_document=ReturnDocument.AFTER,
         session=session,
     )

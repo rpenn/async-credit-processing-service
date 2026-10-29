@@ -59,7 +59,8 @@ def published_tasks(settings: Settings) -> TakeTasks:
 
 
 def _user(db: Database[Document]) -> Document | None:
-    return db[USERS].find_one({"user_id": USER}, {"_id": 0})
+    """Without timestamps; test_credit_is_stored_reserved_and_published checks them."""
+    return db[USERS].find_one({"user_id": USER}, {"_id": 0, "updated_at": 0})
 
 
 def test_credit_is_stored_reserved_and_published(
@@ -83,6 +84,9 @@ def test_credit_is_stored_reserved_and_published(
     assert credit is not None
     assert credit["amount"] == Decimal128("150.00")
     assert _user(db) == {"user_id": USER, "pending_credits": 1, "status": "processing"}
+    user = db[USERS].find_one({"user_id": USER})
+    assert user is not None
+    assert user["updated_at"] == credit["created_at"]
     assert published_tasks() == [(APPLY_CREDIT_TASK, [body["credit_id"]])]
 
 

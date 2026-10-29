@@ -112,7 +112,8 @@ def _wait_until_finished(client: TestClient, credit_id: str) -> str:
 
 
 def _user(db: Database[Document], user_id: str) -> Document | None:
-    return db[USERS].find_one({"user_id": user_id}, {"_id": 0, "user_id": 0})
+    """Without timestamps; test_credit_is_applied_and_creates_the_balance checks them."""
+    return db[USERS].find_one({"user_id": user_id}, {"_id": 0, "user_id": 0, "updated_at": 0})
 
 
 def test_credit_is_applied_and_creates_the_balance(
@@ -126,6 +127,11 @@ def test_credit_is_applied_and_creates_the_balance(
         "status": "processed",
         "balance": Decimal128("150.00"),
     }
+    user = db[USERS].find_one({"user_id": user_id})
+    credit = db[CREDITS].find_one({"_id": credit_id})
+    assert user is not None
+    assert credit is not None
+    assert user["updated_at"] == credit["updated_at"]  # set in the same transaction
 
 
 def test_running_the_task_again_changes_nothing(

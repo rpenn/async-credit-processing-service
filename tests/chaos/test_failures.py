@@ -68,7 +68,7 @@ def _wait_for_status(db: Database[Document], credit_id: str, status: str) -> Non
 
 
 def _user(db: Database[Document], user_id: str) -> Document | None:
-    return db[USERS].find_one({"user_id": user_id}, {"_id": 0, "user_id": 0})
+    return db[USERS].find_one({"user_id": user_id}, {"_id": 0, "user_id": 0, "updated_at": 0})
 
 
 def _credited_once(amount: str) -> Document:

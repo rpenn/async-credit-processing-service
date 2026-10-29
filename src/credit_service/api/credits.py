@@ -91,14 +91,15 @@ async def create_credit(
 
     key = idempotency_key.strip('"')
     db = mongo.get_default_database()
-    credit = repository.new_credit(body.user_id, body.amount, key, utc_now())
+    now = utc_now()
+    credit = repository.new_credit(body.user_id, body.amount, key, now)
 
     # with_transaction retries the whole callback on transient errors (such as a write
     # conflict with a concurrent credit for the same user), so it only touches the database.
     async def accept(session: AsyncClientSession) -> None:
         # Credit first: a reused key fails here, before the user document is touched.
         await repository.insert_credit(db, session, credit)
-        if not await repository.reserve_user(db, session, body.user_id):
+        if not await repository.reserve_user(db, session, body.user_id, now):
             raise ProblemError(  # aborts the transaction, so the credit is not kept
                 ProblemDetails(
                     title="Not Found",

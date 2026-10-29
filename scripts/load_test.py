@@ -25,7 +25,7 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 from credit_service.models import CreditStatus, UserStatus
 from credit_service.money import from_decimal128
-from credit_service.mongo import CREDITS, USERS, Document
+from credit_service.mongo import CREDITS, USERS, Document, utc_now
 
 POLL_SECONDS = 0.5
 
@@ -161,7 +161,13 @@ async def main() -> int:
     async with AsyncMongoClient[Document](args.mongo_uri) as mongo:
         db = mongo.get_default_database()
         # The same documents credit_service.seed creates.
-        await db[USERS].insert_many([{"user_id": u, "pending_credits": 0} for u in users])
+        now = utc_now()
+        await db[USERS].insert_many(
+            [
+                {"user_id": u, "pending_credits": 0, "created_at": now, "updated_at": now}
+                for u in users
+            ]
+        )
 
         limits = httpx2.Limits(max_connections=args.concurrency)
         slots = asyncio.Semaphore(args.concurrency)

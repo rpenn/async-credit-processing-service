@@ -152,13 +152,14 @@ def _finish(credit_id: str, status: CreditStatus) -> Document | None:
 
     # with_transaction reruns this on transient errors, so it only touches the database.
     def finish(session: ClientSession) -> Document | None:
-        credit = repository.finish_pending_credit(db, session, credit_id, status, utc_now())
+        now = utc_now()
+        credit = repository.finish_pending_credit(db, session, credit_id, status, now)
         if credit is None:
             if repository.find_credit(db, session, credit_id) is None:
                 raise UnknownCreditError(credit_id)
             return None
         amount = from_decimal128(credit["amount"]) if status is CreditStatus.APPLIED else None
-        repository.release_user(db, session, credit["user_id"], amount)
+        repository.release_user(db, session, credit["user_id"], amount, now)
         return credit
 
     with pymongo.timeout(ATTEMPT_TIMEOUT_SECONDS), get_client().start_session() as session:

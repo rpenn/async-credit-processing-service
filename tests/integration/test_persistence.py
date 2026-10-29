@@ -33,4 +33,4 @@ def test_release_never_drives_pending_credits_negative(
     db[USERS].insert_one({"user_id": "u_1", "pending_credits": 0})
 
     with mongo_client.start_session() as session, pytest.raises(RuntimeError):
-        worker_repo.release_user(db, session, "u_1", Decimal("1.00"))
+        worker_repo.release_user(db, session, "u_1", Decimal("1.00"), NOW)

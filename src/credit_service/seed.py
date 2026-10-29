@@ -8,7 +8,7 @@ import argparse
 from pydantic import TypeAdapter, ValidationError
 
 from credit_service.models import UserId
-from credit_service.mongo import USERS, create_sync_client, ensure_indexes
+from credit_service.mongo import USERS, create_sync_client, ensure_indexes, utc_now
 from credit_service.settings import Settings
 
 
@@ -32,9 +32,17 @@ def main() -> None:
         ensure_indexes(db)
         for user_id in user_ids:
             # No balance or status yet: the first credit creates them.
+            now = utc_now()
             result = db[USERS].update_one(
                 {"user_id": user_id},
-                {"$setOnInsert": {"user_id": user_id, "pending_credits": 0}},
+                {
+                    "$setOnInsert": {
+                        "user_id": user_id,
+                        "pending_credits": 0,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                },
                 upsert=True,
             )
             print(f"{'created' if result.upserted_id else 'exists '} {user_id}")

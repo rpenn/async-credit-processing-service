@@ -26,12 +26,15 @@ def new_credit(user_id: str, amount: Decimal, idempotency_key: str, now: datetim
 
 
 async def reserve_user(
-    db: AsyncDatabase[Document], session: AsyncClientSession, user_id: str
+    db: AsyncDatabase[Document], session: AsyncClientSession, user_id: str, now: datetime
 ) -> bool:
     """Count one more in-flight credit for the user. False if the user does not exist."""
     result = await db[USERS].update_one(
         {"user_id": user_id},
-        {"$inc": {"pending_credits": 1}, "$set": {"status": UserStatus.PROCESSING}},
+        {
+            "$inc": {"pending_credits": 1},
+            "$set": {"status": UserStatus.PROCESSING, "updated_at": now},
+        },
         session=session,
     )
     return result.matched_count == 1

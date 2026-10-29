@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 
 import pytest
 from pymongo.database import Database
@@ -29,7 +30,9 @@ def test_seed_creates_users_once(
         "",
     ]
     assert db[USERS].count_documents({}) == 2
-    assert db[USERS].find_one({"user_id": "u_1"}, {"_id": 0}) == {
-        "user_id": "u_1",
-        "pending_credits": 0,
-    }
+    user = db[USERS].find_one({"user_id": "u_1"}, {"_id": 0})
+    assert user is not None
+    created_at = user.pop("created_at")
+    assert isinstance(created_at, datetime)
+    # The second run left the user alone, so both timestamps are still the first run's.
+    assert user == {"user_id": "u_1", "pending_credits": 0, "updated_at": created_at}
