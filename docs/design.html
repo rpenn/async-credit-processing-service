@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design: Async Credit Service</title>
+<!-- Source of docs/design.pdf. To regenerate:
+     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
+       --no-pdf-header-footer --print-to-pdf=docs/design.pdf docs/design.html -->
+<style>
+  :root {
+    --ink: #1f2933;
+    --muted: #5f6b7a;
+    --rule: #d5dbe3;
+    --fill: #f4f6f9;
+    --code: #eef1f5;
+    --blue: #3b82f6;
+    --orange: #f59e0b;
+    --green: #10b981;
+    --grey: #9aa5b1;
+  }
+  @page {
+    size: letter;
+    margin: 0.55in 0.65in 0.6in;
+    @bottom-left { content: "Async Credit Service: design"; font: 8pt Helvetica, Arial, sans-serif; color: #5f6b7a; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt Helvetica, Arial, sans-serif; color: #5f6b7a; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #fff;
+    color: var(--ink);
+    font: 9.4pt/1.4 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 7.2in; margin: 0 auto; }
+  h1 {
+    font-size: 19pt;
+    margin: 0 0 4px;
+    padding-bottom: 6px;
+    border-bottom: 2.5px solid var(--ink);
+  }
+  .meta { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  h2 {
+    font-size: 12pt;
+    margin: 12px 0 5px;
+    padding-bottom: 3px;
+    border-bottom: 1px solid var(--rule);
+    break-after: avoid;
+  }
+  p { margin: 0 0 6px; }
+  code {
+    font: 8.4pt/1 ui-monospace, Menlo, monospace;
+    background: var(--code);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  ol, ul { margin: 0 0 6px; padding-left: 18px; }
+  li { margin-bottom: 2px; }
+  .figure {
+    background: var(--fill);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 8px 10px 4px;
+    margin: 4px 0 8px;
+  }
+  .figure svg { display: block; width: 100%; height: auto; }
+  .caption { text-align: center; font-size: 8.4pt; font-style: italic; color: var(--muted); margin: 2px 0 2px; }
+  table { width: 100%; border-collapse: collapse; margin: 2px 0 8px; font-size: 9pt; }
+  th { text-align: left; background: var(--fill); font-weight: 600; }
+  th, td { padding: 3px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  td:first-child, td.run { white-space: nowrap; }
+  .decisions p { margin: 0 0 5px; break-inside: avoid; }
+  /* Failure outcomes: green handled, yellow retried, red error or failed. */
+  td.ok { background: #e8f7ef; box-shadow: inset 3px 0 #10b981; }
+  td.retry { background: #fff6dc; box-shadow: inset 3px 0 #f59e0b; }
+  td.fail { background: #fdeaea; box-shadow: inset 3px 0 #ef4444; }
+  td.retry-fail { background: linear-gradient(90deg, #fff6dc 70%, #fdeaea); box-shadow: inset 3px 0 #f59e0b; }
+  .legend { float: right; font-weight: 400; font-size: 8pt; color: var(--muted); }
+  .legend code { font-size: 7.6pt; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin: 0 3px 0 8px; vertical-align: -1px; }
+  .dot.ok { background: #10b981; }
+  .dot.retry { background: #f59e0b; }
+  .dot.fail { background: #ef4444; }
+  .callout {
+    background: #eff5ff;
+    border-left: 4px solid var(--blue);
+    padding: 7px 12px;
+    margin: 6px 0 8px;
+  }
+  .callout b:first-child { display: block; margin-bottom: 2px; }
+  .keep { break-inside: avoid; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Design Document: Async Credit Service</h1>
+<div class="meta">
+  <span><b>Exercise:</b> Basta Tech Lead take-home</span>
+  <span><b>Stack:</b> FastAPI · Celery · RabbitMQ · MongoDB</span>
+</div>
+
+<h2>1. Goal</h2>
+<p>Credit a user's balance asynchronously: the API answers at once, and a worker applies the
+credit later. <b>FastAPI</b> validates and saves each credit, <b>RabbitMQ</b> holds it until a
+<b>Celery</b> worker applies it, and <b>MongoDB</b> stores every credit and balance as the source of
+truth. The rule that matters most: <b>every accepted credit is applied exactly once, or fails
+without touching the balance, even when a process crashes or a request is repeated.</b></p>
+
+<h2>2. Assumptions and scope</h2>
+<ul>
+  <li><b>Credits only add money.</b> No debits, amounts are positive, 2 decimal places, and capped at 1,000,000. One currency.</li>
+  <li><b>Users must already exist</b> (<code>404</code> otherwise). Creating them is another service's job; a seed command makes test users.</li>
+  <li><b>User status follows <code>pending_credits</code>.</b> Read literally, the brief would mark a user <code>processed</code> while a second credit is still pending.</li>
+  <li><b>No authentication or rate limiting.</b> Only local demo. We would add both for a real deployment.</li>
+</ul>
+
+<h2>3. Architecture & Data Flow</h2>
+<div class="figure keep">
+  <svg viewBox="0 0 800 282" role="img" aria-label="Client posts to the API, which saves to MongoDB and queues to RabbitMQ; the worker takes tasks from RabbitMQ and applies them in MongoDB; the reconciler re-queues stuck credits.">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#5f6b7a"/>
+      </marker>
+    </defs>
+    <g font-family="-apple-system, Helvetica Neue, Helvetica, Arial, sans-serif" text-anchor="middle">
+      <!-- boxes -->
+      <g stroke-width="2" fill="#fff">
+        <rect x="20" y="16" width="140" height="56" rx="8" stroke="#9aa5b1"/>
+        <rect x="230" y="16" width="150" height="56" rx="8" stroke="#3b82f6"/>
+        <rect x="440" y="16" width="150" height="56" rx="8" stroke="#f59e0b"/>
+        <rect x="650" y="16" width="130" height="56" rx="8" stroke="#3b82f6"/>
+        <rect x="440" y="112" width="150" height="56" rx="8" stroke="#3b82f6"/>
+        <rect x="230" y="212" width="550" height="56" rx="8" stroke="#10b981"/>
+      </g>
+      <g font-size="14" font-weight="700" fill="#1f2933">
+        <text x="90" y="40">Client</text>
+        <text x="305" y="40">API</text>
+        <text x="515" y="40">RabbitMQ</text>
+        <text x="715" y="40">Worker</text>
+        <text x="515" y="136">Reconciler</text>
+        <text x="505" y="236">MongoDB</text>
+      </g>
+      <g font-size="11.5" fill="#5f6b7a">
+        <text x="90" y="58">sends a credit</text>
+        <text x="305" y="58">FastAPI</text>
+        <text x="515" y="58">quorum queue</text>
+        <text x="715" y="58">Celery</text>
+        <text x="515" y="154">Celery beat, every min</text>
+        <text x="505" y="254">users · credits — the source of truth</text>
+      </g>
+      <!-- arrows -->
+      <g stroke="#5f6b7a" stroke-width="1.6" fill="none" marker-end="url(#arrow)">
+        <line x1="162" y1="36" x2="226" y2="36"/>
+        <line x1="228" y1="54" x2="164" y2="54"/>
+        <line x1="382" y1="44" x2="436" y2="44"/>
+        <line x1="592" y1="44" x2="646" y2="44"/>
+        <line x1="305" y1="74" x2="305" y2="208"/>
+        <line x1="715" y1="74" x2="715" y2="208"/>
+        <line x1="515" y1="110" x2="515" y2="76" stroke-dasharray="5 4"/>
+        <line x1="515" y1="170" x2="515" y2="208" stroke-dasharray="5 4"/>
+      </g>
+      <g font-size="11" fill="#1f2933">
+        <text x="194" y="30">① POST</text>
+        <text x="194" y="68">③ 202</text>
+        <text x="409" y="36">③ queue</text>
+        <text x="619" y="36">④ deliver</text>
+        <text x="313" y="136" text-anchor="start">② save credit</text>
+        <text x="313" y="151" text-anchor="start">as pending</text>
+        <text x="707" y="136" text-anchor="end">⑤ apply once,</text>
+        <text x="707" y="151" text-anchor="end">then ack</text>
+        <text x="523" y="97" text-anchor="start" fill="#5f6b7a">re-queue</text>
+        <text x="523" y="194" text-anchor="start" fill="#5f6b7a">finds stuck credits</text>
+      </g>
+    </g>
+  </svg>
+  <p class="caption">One Docker image runs the API, worker and reconciler. Tasks carry only a credit ID; MongoDB holds everything else.</p>
+</div>
+
+<ol>
+  <li><b>POST.</b> The client sends <code>POST /credits</code> with a required <code>Idempotency-Key</code>.</li>
+  <li><b>Save.</b> In one MongoDB transaction, the API inserts the credit as <code>pending</code> and adds 1 to the user's <code>pending_credits</code> (status <code>processing</code>).</li>
+  <li><b>Queue.</b> Only after the commit, it publishes the credit ID, waits for RabbitMQ's confirm, and answers <code>202</code>.</li>
+  <li><b>Deliver.</b> RabbitMQ hands the task to a worker.</li>
+  <li><b>Apply.</b> In one transaction, the worker moves the credit to <code>applied</code> <i>only if still pending</i>, adds the amount to <code>balance</code>, and subtracts 1 from <code>pending_credits</code> (status <code>processed</code> at zero). Then it acknowledges the task.</li>
+</ol>
+
+<h2>4. Data</h2>
+<table class="keep">
+  <tr><th>Collection</th><th>Fields</th></tr>
+  <tr><td><b>users</b></td><td><code>user_id</code> (unique) · <code>balance</code> (<code>Decimal128</code>), created by the first credit's <code>$inc</code> · <code>status</code> and <code>pending_credits</code>: <code>processed</code> only when no credit is in flight · <code>created_at</code>, <code>updated_at</code></td></tr>
+  <tr><td><b>credits</b></td><td><code>_id</code>: the credit ID returned to the client, also the Celery task ID · <code>amount</code>: <code>Decimal128</code>, never a float · <code>status</code>: <code>pending</code> → <code>applied</code> or <code>failed</code> · <code>idempotency_key</code> (unique) · <code>attempts</code>: reconciler re-queues, <code>failed</code> after 3</td></tr>
+</table>
+
+<h2>5. Key decisions</h2>
+<div class="decisions">
+  <p><b>Save first, then queue.</b> Publishing first could queue a credit whose save then fails. Saving first means a failed publish leaves a <code>pending</code> credit, which the reconciler re-queues after 5 minutes.</p>
+  <p><b>Exactly once on top of at-least-once delivery.</b> The worker's "only if still pending" update runs in the same transaction as the balance change, and the task is acknowledged only after commit. A duplicate delivery does nothing; a crash mid-task leaves the task in RabbitMQ for another worker.</p>
+  <p><b>The Idempotency-Key is required.</b> Without one, a retry after a lost response looks like a new credit. Missing key: <code>400</code>. Same key, different body: <code>422</code>. A concurrent repeat waits for the original to commit and gets it back.</p>
+  <p><b>RabbitMQ quorum queues, not Redis.</b> Messages on disk, confirmed publishes, and a built-in delivery limit and dead-letter queue.</p>
+  <p><b>A reconciler, not a transactional outbox.</b> It covers the gap between saving and queueing with less machinery. The cost: up to about 6 minutes' delay when RabbitMQ is down. It's the first thing to change if that matters.</p>
+</div>
+
+<h2>6. Failure handling</h2>
+<table class="keep">
+  <tr><th>Failure</th><th>What happens <span class="legend"><i class="dot ok"></i>handled <i class="dot retry"></i>retried <i class="dot fail"></i>error or <code>failed</code></span></th></tr>
+  <tr><td>Response lost, client retries</td><td class="ok">The same key returns the original credit. One credit.</td></tr>
+  <tr><td>MongoDB down for the API</td><td class="fail"><code>503</code> within 5 s; the client retries with the same key.</td></tr>
+  <tr><td>RabbitMQ down at publish</td><td class="retry">Still <code>202</code>; the reconciler queues the credit later.</td></tr>
+  <tr><td>Worker killed mid-credit</td><td class="retry">Nothing committed; RabbitMQ redelivers. Applied once.</td></tr>
+  <tr><td>MongoDB down for the worker</td><td class="retry-fail">Retries after 1, 2, 4 … 64 s (127 s), then <code>failed</code>, balance untouched.</td></tr>
+  <tr><td>Task keeps crashing workers</td><td class="retry-fail">Dead-letter queue after 6 deliveries; the reconciler retries 3 times, then <code>failed</code>.</td></tr>
+</table>
+
+<div class="callout keep">
+  <b>Found by the chaos tests</b>
+  A killed worker leaves its MongoDB transaction open for up to 90 s (measured: 88 s), blocking
+  the retried credit; the worker's retries now last 127 s. A silently dead connection hung the
+  API for minutes, which led to a 5-second limit on every database call and publish.
+</div>
+
+<h2>7. Testing strategy</h2>
+<table class="keep">
+  <tr><th>Kind</th><th>What it proves</th><th>Run</th></tr>
+  <tr><td><b>Unit</b></td><td>Amount parsing, exact decimals in JSON, log format.</td><td class="run" rowspan="2"><code>uv run pytest</code><br>65 tests, ~35 s,<br>CI on every push</td></tr>
+  <tr><td><b>Integration</b></td><td>API and worker against real MongoDB and RabbitMQ: validation, idempotency, duplicate delivery, retries, dead-lettering, reconciler.</td></tr>
+  <tr><td><b>Chaos</b></td><td>Toxiproxy drops and freezes connections; processes are killed mid-credit. Each failure above has a test.</td><td class="run"><code>pytest -m chaos</code><br>10 tests, ~3 min</td></tr>
+  <tr><td><b>Load</b></td><td>Thousands of concurrent credits, 10% repeated; every balance must equal the sum of its credits.</td><td class="run"><code>load_test.py</code><br>~5 s</td></tr>
+</table>
+
+<h2>8. Limits and next steps</h2>
+<ul>
+  <li><b>Scaling:</b> one API process accepts about 440 credits/s and is the bottleneck; API processes share nothing, so add more. Credits for one user take turns on one record, which keeps the balance correct. MongoDB is a single node here; production needs three.</li>
+  <li><b>Alerts (not built):</b> page on dead-lettered messages, <code>failed</code> credits, a <code>pending</code> credit older than 10 minutes, or a growing queue; warn on slow or failing API responses.</li>
+</ul>
+
+</main>
+</body>
+</html>
