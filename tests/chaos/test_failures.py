@@ -46,7 +46,7 @@ def _breaker(toxiproxy: Toxiproxy, failure: str) -> Callable[[str], None]:
 def _post(
     api: httpx2.Client, user_id: str, amount: str = "10.00", key: str | None = None
 ) -> httpx2.Response:
-    headers = {"Idempotency-Key": key} if key else {}
+    headers = {"Idempotency-Key": key or str(uuid.uuid4())}
     return api.post("/credits", json={"user_id": user_id, "amount": amount}, headers=headers)
 
 

@@ -19,10 +19,8 @@ from credit_service.worker import repository as worker_repo
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def test_idempotency_key_is_unique_but_optional(db: Database[Document]) -> None:
+def test_idempotency_key_is_unique(db: Database[Document]) -> None:
     ensure_indexes(db)
-    for _ in range(2):  # many credits without a key are fine (partial index)
-        db[CREDITS].insert_one(api_repo.new_credit("u_1", Decimal("1.00"), None, NOW))
     db[CREDITS].insert_one(api_repo.new_credit("u_1", Decimal("1.00"), "key-1", NOW))
 
     with pytest.raises(DuplicateKeyError):

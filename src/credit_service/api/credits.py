@@ -13,7 +13,12 @@ from pymongo.errors import DuplicateKeyError
 
 from credit_service.api import repository
 from credit_service.api.decimal_json import DecimalJSONRoute
-from credit_service.api.problems import PROBLEM_RESPONSE, ProblemDetails, ProblemError
+from credit_service.api.problems import (
+    IDEMPOTENCY_KEY_REUSED,
+    PROBLEM_RESPONSE,
+    ProblemDetails,
+    ProblemError,
+)
 from credit_service.messaging import publish_apply_credit
 from credit_service.models import CreditRequest, CreditResponse
 from credit_service.money import from_decimal128
@@ -29,9 +34,6 @@ router = APIRouter(prefix="/credits", tags=["credits"], route_class=DecimalJSONR
 # ("abc"). Many clients send it bare (abc), so both are accepted and mean the same key.
 # Printable ASCII without quotes or backslashes, 1-255 characters.
 _IDEMPOTENCY_KEY = r'^(?:"[ !#-\[\]-~]{1,255}"|[!#-\[\]-~]{1,255})$'
-
-# Distinct from schema validation errors (also 422), so clients can tell the two apart.
-IDEMPOTENCY_KEY_REUSED = "tag:basta-credit-service,2026:idempotency-key-reused"
 
 
 def _mongo(request: Request) -> AsyncMongoClient[Document]:
@@ -54,7 +56,11 @@ CeleryApp = Annotated[Celery, Depends(_celery)]
 AppSettings = Annotated[Settings, Depends(_settings)]
 
 
-@router.post("", status_code=status.HTTP_202_ACCEPTED, responses={404: PROBLEM_RESPONSE})
+@router.post(
+    "",
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={400: PROBLEM_RESPONSE, 404: PROBLEM_RESPONSE},
+)
 async def create_credit(
     body: CreditRequest,
     request: Request,
@@ -62,12 +68,13 @@ async def create_credit(
     mongo: Mongo,
     celery: CeleryApp,
     settings: AppSettings,
-    idempotency_key: Annotated[str | None, Header(pattern=_IDEMPOTENCY_KEY)] = None,
+    idempotency_key: Annotated[str, Header(pattern=_IDEMPOTENCY_KEY)],
 ) -> CreditResponse:
     """Accept a credit. The balance changes later, in the worker; poll the Location URL.
 
-    Reusing an Idempotency-Key with the same body returns the original credit. Reusing it
-    with a different body returns 422 problem details.
+    The Idempotency-Key is required: without it, a client retrying after a lost response
+    would credit the user twice. Reusing a key with the same body returns the original
+    credit; with a different body, 422 problem details.
     """
     if body.amount > settings.max_credit_amount:
         raise RequestValidationError(
@@ -82,7 +89,7 @@ async def create_credit(
             ]
         )
 
-    key = idempotency_key.strip('"') if idempotency_key is not None else None
+    key = idempotency_key.strip('"')
     db = mongo.get_default_database()
     credit = repository.new_credit(body.user_id, body.amount, key, utc_now())
 
@@ -111,7 +118,7 @@ async def create_credit(
         # The key belongs to a credit that has already committed: until a transaction
         # commits, a concurrent one with the same key gets a write conflict and is retried.
         # So a duplicate is never "still in flight" and the draft's 409 cannot happen here.
-        original = await repository.find_credit_by_idempotency_key(db, key) if key else None
+        original = await repository.find_credit_by_idempotency_key(db, key)
         if original is None:
             raise
         _ensure_same_request(original, body)

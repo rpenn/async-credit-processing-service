@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from pymongo.database import Database
 
-from credit_service.api.credits import IDEMPOTENCY_KEY_REUSED
 from credit_service.api.main import create_app
+from credit_service.api.problems import IDEMPOTENCY_KEY_MISSING, IDEMPOTENCY_KEY_REUSED
 from credit_service.logs import JsonFormatter
 from credit_service.messaging import APPLY_CREDIT_TASK, create_celery_app
 from credit_service.mongo import CREDITS, USERS, Document
@@ -19,6 +19,7 @@ from credit_service.settings import Settings
 
 USER = "u_1"
 PROBLEM_JSON = "application/problem+json"
+KEY = {"Idempotency-Key": "k-1"}
 
 type TakeTasks = Callable[[], list[tuple[str, list[Any]]]]
 
@@ -64,7 +65,7 @@ def _user(db: Database[Document]) -> Document | None:
 def test_credit_is_stored_reserved_and_published(
     client: TestClient, db: Database[Document], published_tasks: TakeTasks
 ) -> None:
-    response = client.post("/credits", json={"user_id": USER, "amount": "150.00"})
+    response = client.post("/credits", json={"user_id": USER, "amount": "150.00"}, headers=KEY)
 
     assert response.status_code == 202
     body = response.json()
@@ -112,7 +113,7 @@ def test_invalid_requests_are_rejected_before_anything_is_stored(
     echoed_input: str,
 ) -> None:
     response = client.post(
-        "/credits", content=content, headers={"Content-Type": "application/json", **headers}
+        "/credits", content=content, headers={"Content-Type": "application/json", **KEY, **headers}
     )
 
     assert response.status_code == 422
@@ -127,12 +128,26 @@ def test_invalid_requests_are_rejected_before_anything_is_stored(
 def test_unknown_user_returns_404_and_stores_nothing(
     client: TestClient, db: Database[Document], published_tasks: TakeTasks
 ) -> None:
-    response = client.post("/credits", json={"user_id": "u_missing", "amount": "1.00"})
+    response = client.post("/credits", json={"user_id": "u_missing", "amount": "1.00"}, headers=KEY)
 
     assert response.status_code == 404
     assert response.headers["content-type"] == PROBLEM_JSON
     assert response.json()["type"] == "about:blank"
     assert db[CREDITS].count_documents({}) == 0
+    assert published_tasks() == []
+
+
+def test_missing_idempotency_key_returns_400_and_stores_nothing(
+    client: TestClient, db: Database[Document], published_tasks: TakeTasks
+) -> None:
+    """Checked before the body: the client must fix it in any case."""
+    response = client.post("/credits", json={"user_id": USER, "amount": "0"})
+
+    assert response.status_code == 400
+    assert response.headers["content-type"] == PROBLEM_JSON
+    assert response.json()["type"] == IDEMPOTENCY_KEY_MISSING
+    assert db[CREDITS].count_documents({}) == 0
+    assert _user(db) == {"user_id": USER, "pending_credits": 0}
     assert published_tasks() == []
 
 
@@ -167,10 +182,9 @@ def test_same_key_and_body_replays_the_original_credit(
 def test_same_key_with_different_body_returns_problem_details(
     client: TestClient, db: Database[Document]
 ) -> None:
-    headers = {"Idempotency-Key": "k-1"}
-    client.post("/credits", json={"user_id": USER, "amount": "10.00"}, headers=headers)
+    client.post("/credits", json={"user_id": USER, "amount": "10.00"}, headers=KEY)
 
-    response = client.post("/credits", json={"user_id": USER, "amount": "20.00"}, headers=headers)
+    response = client.post("/credits", json={"user_id": USER, "amount": "20.00"}, headers=KEY)
 
     assert response.status_code == 422
     assert response.headers["content-type"] == PROBLEM_JSON
@@ -211,7 +225,7 @@ def test_publish_failure_still_accepts_a_durable_pending_credit(
     broken = settings.model_copy(update={"broker_url": SecretStr("amqp://test:test@127.0.0.1:1//")})
 
     with TestClient(create_app(broken)) as client, caplog.at_level(logging.WARNING):
-        response = client.post("/credits", json={"user_id": USER, "amount": "1.00"})
+        response = client.post("/credits", json={"user_id": USER, "amount": "1.00"}, headers=KEY)
 
     assert response.status_code == 202
     credit_id = response.json()["credit_id"]

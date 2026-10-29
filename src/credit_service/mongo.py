@@ -26,14 +26,7 @@ CREDITS = "credits"
 USER_INDEXES = [IndexModel("user_id", unique=True, name="user_id_unique")]
 
 CREDIT_INDEXES = [
-    # Partial (not sparse, per the MongoDB docs): only credits sent with an Idempotency-Key
-    # are indexed, so any number of credits without a key can coexist.
-    IndexModel(
-        "idempotency_key",
-        unique=True,
-        partialFilterExpression={"idempotency_key": {"$type": "string"}},
-        name="idempotency_key_unique",
-    ),
+    IndexModel("idempotency_key", unique=True, name="idempotency_key_unique"),
     # The reconciler looks for credits still pending after a threshold.
     IndexModel([("status", ASCENDING), ("updated_at", ASCENDING)], name="status_updated_at"),
 ]

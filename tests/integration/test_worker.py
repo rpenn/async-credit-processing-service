@@ -90,7 +90,11 @@ def _without_broker(settings: Settings) -> Settings:
 
 
 def _post(client: TestClient, user_id: str, amount: str) -> str:
-    response = client.post("/credits", json={"user_id": user_id, "amount": amount})
+    response = client.post(
+        "/credits",
+        json={"user_id": user_id, "amount": amount},
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+    )
     assert response.status_code == 202
     credit_id: str = response.json()["credit_id"]
     return credit_id
@@ -220,7 +224,7 @@ def test_the_request_correlation_id_reaches_the_worker(
     response = client.post(
         "/credits",
         json={"user_id": user_id, "amount": "1.00"},
-        headers={"X-Correlation-ID": "trace-me"},
+        headers={"Idempotency-Key": str(uuid.uuid4()), "X-Correlation-ID": "trace-me"},
     )
 
     assert _wait_until_finished(client, response.json()["credit_id"]) == "applied"

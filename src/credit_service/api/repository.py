@@ -12,22 +12,17 @@ from credit_service.money import from_decimal128, to_decimal128
 from credit_service.mongo import CREDITS, USERS, Document
 
 
-def new_credit(
-    user_id: str, amount: Decimal, idempotency_key: str | None, now: datetime
-) -> Document:
-    credit: Document = {
+def new_credit(user_id: str, amount: Decimal, idempotency_key: str, now: datetime) -> Document:
+    return {
         "_id": str(uuid.uuid4()),  # the credit_id returned to the client
         "user_id": user_id,
         "amount": to_decimal128(amount),
         "status": CreditStatus.PENDING,
+        "idempotency_key": idempotency_key,
         "attempts": 0,
         "created_at": now,
         "updated_at": now,
     }
-    # Only stored when present, so the partial unique index ignores credits without a key.
-    if idempotency_key is not None:
-        credit["idempotency_key"] = idempotency_key
-    return credit
 
 
 async def reserve_user(

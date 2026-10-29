@@ -1,7 +1,7 @@
 """Error responses.
 
 Errors the app raises itself are RFC 9457 problem details (application/problem+json).
-Request validation errors keep FastAPI's standard 422 body.
+Request validation errors keep FastAPI's standard 422 body, except a missing Idempotency-Key.
 """
 
 import logging
@@ -19,6 +19,11 @@ from credit_service.mongo import is_transient
 logger = logging.getLogger(__name__)
 
 PROBLEM_JSON = "application/problem+json"
+
+# The IETF Idempotency-Key draft's two errors (section 2.7). Their own types, so clients can
+# tell a reused key from a schema validation error, which is also a 422.
+IDEMPOTENCY_KEY_MISSING = "tag:basta-credit-service,2026:idempotency-key-missing"
+IDEMPOTENCY_KEY_REUSED = "tag:basta-credit-service,2026:idempotency-key-reused"
 
 
 class ProblemDetails(BaseModel):
@@ -53,7 +58,22 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
     The default encoder turns Decimal into float, which would show a different number
     than the client sent. https://fastapi.tiangolo.com/tutorial/handling-errors/
+
+    A missing Idempotency-Key is a 400 problem instead, as the IETF draft asks (section 2.7):
+    https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/
     """
+    if any(
+        error["type"] == "missing" and tuple(error["loc"]) == ("header", "idempotency-key")
+        for error in exc.errors()
+    ):
+        problem = ProblemDetails(
+            type=IDEMPOTENCY_KEY_MISSING,
+            title="Idempotency-Key is missing",
+            status=400,
+            detail="Send an Idempotency-Key header: a unique value for each credit, sent again "
+            "unchanged when retrying it.",
+        )
+        return JSONResponse(problem.model_dump(), status_code=400, media_type=PROBLEM_JSON)
     errors = jsonable_encoder(exc.errors(), custom_encoder={Decimal: str})
     return JSONResponse({"detail": errors}, status_code=422)
 
