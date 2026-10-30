@@ -51,47 +51,61 @@ one copy of each database.
 
 ## Run it
 
-You need [Docker](https://docs.docker.com/get-docker/) (Docker Desktop on a Mac or Windows).
+You need [Docker](https://docs.docker.com/get-docker/) (Docker Desktop on a Mac or Windows) and
+[Git](https://git-scm.com/downloads).
+
+**1. Get the code.**
+
+```bash
+git clone https://github.com/rpenn/basta-credit-service.git
+cd basta-credit-service
+```
+
+**2. Create your settings file.**
 
 ```bash
 cp .env.example .env
 ```
 
-This creates your local settings file. Open `.env` and change `RABBITMQ_PASSWORD`. The file is
-never committed.
+This creates `.env`, your local settings. It is never committed.
+
+> [!WARNING]
+> **Open `.env` and change `RABBITMQ_PASSWORD` now, before step 3.** RabbitMQ saves the password
+> the first time it starts. If you change it later, the services can't log in until you delete
+> RabbitMQ's data with `docker compose down --volumes`.
+
+**3. Build and start everything.**
 
 ```bash
 docker compose up --build --wait
 ```
 
-Starts everything: the API, the worker, the reconciler, MongoDB and RabbitMQ. `--build` builds
-the app from this code; `--wait` returns once every part reports healthy (about a minute the
-first time).
+Starts the API, the worker, the reconciler, MongoDB and RabbitMQ. `--build` builds the app from
+this code; `--wait` returns once every part reports healthy (about a minute the first time).
+
+**4. Create two users.** Credits are only accepted for users that exist.
 
 ```bash
 docker compose exec api python -m credit_service.seed u_123 u_456
 ```
 
-Creates two users. Credits are only accepted for users that exist.
+**5. Send a credit.** It is labelled with a new random idempotency key (`uuidgen` makes one).
 
 ```bash
 curl -X POST localhost:8000/credits -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" -d '{"user_id": "u_123", "amount": "150.00"}'
 ```
 
-Sends a credit, labelled with a new random key (`uuidgen` makes one). The answer comes back at
-once, with status `pending`:
+The answer comes back at once, with status `pending`, like this:
+`{"credit_id": "a9ce84cc-…", "user_id": "u_123", "amount": "150.00", "status": "pending", …}`
 
-```json
-{"credit_id": "a9ce84cc-…", "user_id": "u_123", "amount": "150.00", "status": "pending", …}
-```
+**6. Check the balance.**
 
 ```bash
 docker compose exec mongo mongosh credit_service --quiet --eval 'db.users.find({}, {_id: 0})'
 ```
 
-Shows the users. A moment later, `u_123` has `balance: Decimal128('150.00')` and
-`status: 'processed'`.
+A moment after step 5, `u_123` has `balance: Decimal128('150.00')` and `status: 'processed'`.
 
 **Other things to look at:**
 
