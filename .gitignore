@@ -1,5 +1,6 @@
-# Private build prompt (not part of the submission)
-basta-credit-service-prompt.md
+# every Markdown file except the README
+*.md
+!README.md
 
 # Secrets and local environment
 .env

@@ -57,8 +57,8 @@ You need [Docker](https://docs.docker.com/get-docker/) (Docker Desktop on a Mac 
 **1. Get the code.**
 
 ```bash
-git clone https://github.com/rpenn/basta-credit-service.git
-cd basta-credit-service
+git clone https://github.com/rpenn/async-credit-processing-service.git
+cd async-credit-processing-service
 ```
 
 **2. Create your settings file.**

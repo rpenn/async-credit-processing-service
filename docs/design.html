@@ -193,12 +193,12 @@ without touching the balance, even when a process crashes or a request is repeat
   <tr><td><b>credits</b></td><td><code>_id</code>: the credit ID returned to the client, also the Celery task ID · <code>amount</code>: <code>Decimal128</code>, never a float · <code>status</code>: <code>pending</code> → <code>applied</code> or <code>failed</code> · <code>idempotency_key</code> (unique) · <code>attempts</code>: reconciler re-queues, <code>failed</code> after 3</td></tr>
 </table>
 
-<h2>5. Key decisions</h2>
+<h2>5. Key decisions and trade-offs</h2>
 <div class="decisions">
   <p><b>Save first, then queue.</b> Publishing first could queue a credit whose save then fails. Saving first means a failed publish leaves a <code>pending</code> credit, which the reconciler re-queues after 5 minutes.</p>
   <p><b>Exactly once on top of at-least-once delivery.</b> The worker's "only if still pending" update runs in the same transaction as the balance change, and the task is acknowledged only after commit. A duplicate delivery does nothing; a crash mid-task leaves the task in RabbitMQ for another worker.</p>
-  <p><b>The Idempotency-Key is required.</b> Without one, a retry after a lost response looks like a new credit. Missing key: <code>400</code>. Same key, different body: <code>422</code>. A concurrent repeat waits for the original to commit and gets it back.</p>
-  <p><b>RabbitMQ quorum queues, not Redis.</b> Messages on disk, confirmed publishes, and a built-in delivery limit and dead-letter queue.</p>
+  <p><b>The Idempotency-Key is required.</b> Without one, a retry after a lost response looks like a new credit. Missing key: <code>400</code>. Same key, different body: <code>422</code>. A concurrent repeat waits for the original to commit and gets it back. The cost: every client must send a key.</p>
+  <p><b>RabbitMQ, not Redis.</b> Messages on disk, confirmed publishes, and a built-in delivery limit and dead-letter queue. The cost: one more service to run.</p>
   <p><b>A reconciler, not a transactional outbox.</b> It covers the gap between saving and queueing with less machinery. The cost: up to about 6 minutes' delay when RabbitMQ is down. It's the first thing to change if that matters.</p>
 </div>
 
@@ -228,11 +228,13 @@ without touching the balance, even when a process crashes or a request is repeat
   <tr><td><b>Chaos</b></td><td>Toxiproxy drops and freezes connections; processes are killed mid-credit. Each failure above has a test.</td><td class="run"><code>pytest -m chaos</code><br>10 tests, ~3 min</td></tr>
   <tr><td><b>Load</b></td><td>Thousands of concurrent credits, 10% repeated; every balance must equal the sum of its credits.</td><td class="run"><code>load_test.py</code><br>~5 s</td></tr>
 </table>
+<p>Real MongoDB and RabbitMQ, not mocks: slower, but that is how the two bugs above were found.</p>
 
-<h2>8. Limits and next steps</h2>
+<h2>8. Next steps</h2>
 <ul>
-  <li><b>Scaling:</b> one API process accepts about 440 credits/s and is the bottleneck; API processes share nothing, so add more. Credits for one user take turns on one record, which keeps the balance correct. MongoDB is a single node here; production needs three.</li>
-  <li><b>Alerts (not built):</b> page on dead-lettered messages, <code>failed</code> credits, a <code>pending</code> credit older than 10 minutes, or a growing queue; warn on slow or failing API responses.</li>
+  <li><b>Authentication and rate limiting:</b> first, before anyone else can reach the API.</li>
+  <li><b>Scaling:</b> one API process handles about 440 credits/s and is the bottleneck; they share nothing, so add more. Credits for one user take turns, which keeps balances exact. MongoDB is one node here; production needs three.</li>
+  <li><b>Alerts (not built):</b> page on dead-lettered messages, <code>failed</code> credits, a credit <code>pending</code> over 10 minutes, or a growing queue; warn on slow or failing responses.</li>
 </ul>
 
 </main>
